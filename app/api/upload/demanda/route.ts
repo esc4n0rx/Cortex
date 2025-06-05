@@ -26,17 +26,18 @@ export async function POST(request: NextRequest) {
 
     console.log('Headers encontrados:', headers)
 
-    // Mapear índices das colunas baseado nos cabeçalhos
+    // CORREÇÃO: Função para buscar coluna exata
     const getColumnIndex = (possibleNames: string[]): number => {
       for (const name of possibleNames) {
-        const index = headers.findIndex(h => h.includes(name.toUpperCase()))
+        // Buscar match exato, não apenas "includes"
+        const index = headers.findIndex(h => h === name.toUpperCase())
         if (index !== -1) return index
       }
       return -1
     }
 
     const columnMapping = {
-      n_deposito: getColumnIndex(['N_DEPOSITO', 'DEPOSITO']),
+      // n_deposito será fixo como "CD03" - não precisa mapear coluna
       numero_nt: getColumnIndex(['NUMERO_NT', 'NT']),
       status: getColumnIndex(['STATUS']),
       tp_transporte: getColumnIndex(['TP_TRANSPORTE']),
@@ -55,8 +56,9 @@ export async function POST(request: NextRequest) {
       centro: getColumnIndex(['CENTRO']),
       quant_nt: getColumnIndex(['QUANT_NT']),
       unidade: getColumnIndex(['UNIDADE']),
-      numero_ot: getColumnIndex(['NUMERO_OT', 'OT']),
+      numero_ot: getColumnIndex(['NUMERO_OT']),
       quant_ot: getColumnIndex(['QUANT_OT']),
+      // CORREÇÃO: Buscar exatamente "DEPOSITO", não "N_DEPOSITO"
       deposito: getColumnIndex(['DEPOSITO']),
       desc_material: getColumnIndex(['DESC_MATERIAL']),
       setor: getColumnIndex(['SETOR']),
@@ -73,6 +75,15 @@ export async function POST(request: NextRequest) {
     }
 
     console.log('Mapeamento de colunas:', columnMapping)
+
+    // Verificar se a coluna DEPOSITO foi encontrada
+    if (columnMapping.deposito === -1) {
+      return NextResponse.json({ 
+        error: 'Coluna DEPOSITO não encontrada no arquivo. Certifique-se de que existe uma coluna chamada exatamente DEPOSITO.',
+        columnMapping,
+        headersEncontrados: headers
+      }, { status: 400 })
+    }
 
     // LIMPAR TODOS OS REGISTROS EXISTENTES ANTES DE INSERIR NOVOS
     console.log('Limpando dados de demanda existentes...')
@@ -213,6 +224,27 @@ export async function POST(request: NextRequest) {
       return null
     }
 
+    // Função para validar deposito - agora mais flexível
+    const validateDeposito = (depositoValue: any): string | null => {
+      if (!depositoValue) return null
+      
+      const deposito = depositoValue.toString().trim().toUpperCase()
+      
+      // Aceitar valores no formato DPxx
+      if (deposito.match(/^DP\d+$/)) {
+        return deposito
+      }
+      
+      // Aceitar outros valores comuns e não validar muito rígido por enquanto
+      // Deixar passar qualquer valor não vazio para debug
+      if (deposito.length > 0) {
+        console.log(`Valor de deposito encontrado: "${deposito}"`)
+        return deposito
+      }
+      
+      return null
+    }
+
     for (let i = 0; i < rows.length; i += BATCH_SIZE) {
       const batch = rows.slice(i, i + BATCH_SIZE)
       const batchData: any[] = []
@@ -225,8 +257,17 @@ export async function POST(request: NextRequest) {
           // Pular linhas vazias
           if (!row || row.every((cell: any) => !cell)) continue
 
+          // Obter valor do deposito
+          const depositoValue = validateDeposito(row[columnMapping.deposito])
+          
+          // Log de debug para as primeiras linhas
+          if (rowIndex <= 5) {
+            console.log(`Linha ${rowIndex}: deposito = "${row[columnMapping.deposito]}" -> validado = "${depositoValue}"`);
+          }
+
           const record = {
-            n_deposito: columnMapping.n_deposito >= 0 ? row[columnMapping.n_deposito]?.toString() || null : null,
+            // n_deposito fixo como "CD03"
+            n_deposito: 'CD03',
             numero_nt: columnMapping.numero_nt >= 0 ? convertInteger(row[columnMapping.numero_nt]) : null,
             status: columnMapping.status >= 0 ? row[columnMapping.status]?.toString() || null : null,
             tp_transporte: columnMapping.tp_transporte >= 0 ? row[columnMapping.tp_transporte]?.toString() || null : null,
@@ -247,7 +288,8 @@ export async function POST(request: NextRequest) {
             unidade: columnMapping.unidade >= 0 ? row[columnMapping.unidade]?.toString() || null : null,
             numero_ot: columnMapping.numero_ot >= 0 ? convertInteger(row[columnMapping.numero_ot]) : null,
             quant_ot: columnMapping.quant_ot >= 0 ? convertNumber(row[columnMapping.quant_ot]) : null,
-            deposito: columnMapping.deposito >= 0 ? row[columnMapping.deposito]?.toString() || null : null,
+            // Usar valor da coluna DEPOSITO (coluna 21)
+            deposito: depositoValue,
             desc_material: columnMapping.desc_material >= 0 ? row[columnMapping.desc_material]?.toString() || null : null,
             setor: columnMapping.setor >= 0 ? row[columnMapping.setor]?.toString() || null : null,
             palete: columnMapping.palete >= 0 ? convertInteger(row[columnMapping.palete]) : null,
@@ -272,6 +314,15 @@ export async function POST(request: NextRequest) {
 
       if (batchData.length > 0) {
         console.log(`Tentando inserir lote ${Math.floor(i / BATCH_SIZE) + 1} com ${batchData.length} registros`)
+        
+        // Log de debug para verificar alguns registros
+        if (i === 0) {
+          console.log('Primeiros registros do lote:', batchData.slice(0, 3).map(r => ({
+            n_deposito: r.n_deposito,
+            deposito: r.deposito,
+            material: r.material
+          })))
+        }
         
         const { data, error } = await supabase
           .from('cortex_demanda')
