@@ -1,3 +1,4 @@
+// app/api/upload/estoque/route.ts
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
 import * as XLSX from 'xlsx'
@@ -52,6 +53,22 @@ export async function POST(request: NextRequest) {
       }, { status: 400 })
     }
 
+    // LIMPAR TODOS OS REGISTROS EXISTENTES ANTES DE INSERIR NOVOS
+    console.log('Limpando dados de estoque existentes...')
+    const { error: deleteError } = await supabase
+      .from('cortex_estoque')
+      .delete()
+      .neq('id', 0) // Deletar todos os registros
+
+    if (deleteError) {
+      console.error('Erro ao limpar dados de estoque:', deleteError)
+      return NextResponse.json({ 
+        error: `Erro ao limpar dados existentes: ${deleteError.message}` 
+      }, { status: 500 })
+    }
+
+    console.log('Dados de estoque existentes removidos com sucesso')
+
     const errors: string[] = []
     const successRecords: any[] = []
     const BATCH_SIZE = 100
@@ -66,6 +83,9 @@ export async function POST(request: NextRequest) {
         const row = batch[j]
 
         try {
+          // Pular linhas vazias
+          if (!row || row.every((cell: any) => !cell)) continue
+
           // Validar dados obrigatórios
           if (!row[0]) {
             errors.push(`Linha ${rowIndex}: Material é obrigatório`)
@@ -123,13 +143,17 @@ export async function POST(request: NextRequest) {
 
       // Inserir lote no banco
       if (batchData.length > 0) {
+        console.log(`Inserindo lote ${Math.floor(i / BATCH_SIZE) + 1} com ${batchData.length} registros`)
+        
         const { data, error } = await supabase
           .from('cortex_estoque')
           .insert(batchData)
 
         if (error) {
+          console.error('Erro ao inserir lote:', error)
           errors.push(`Erro ao inserir lote ${Math.floor(i / BATCH_SIZE) + 1}: ${error.message}`)
         } else {
+          console.log(`Lote ${Math.floor(i / BATCH_SIZE) + 1} inserido com sucesso`)
           successRecords.push(...batchData)
         }
       }
@@ -137,7 +161,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message: `Upload concluído. ${successRecords.length} registros inseridos.`,
+      message: `Upload concluído. ${successRecords.length} registros inseridos. Dados anteriores foram removidos.`,
       totalProcessed: rows.length,
       successCount: successRecords.length,
       errorCount: errors.length,

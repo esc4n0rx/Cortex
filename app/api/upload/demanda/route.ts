@@ -1,3 +1,4 @@
+// app/api/upload/demanda/route.ts
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
 import * as XLSX from 'xlsx'
@@ -72,6 +73,22 @@ export async function POST(request: NextRequest) {
     }
 
     console.log('Mapeamento de colunas:', columnMapping)
+
+    // LIMPAR TODOS OS REGISTROS EXISTENTES ANTES DE INSERIR NOVOS
+    console.log('Limpando dados de demanda existentes...')
+    const { error: deleteError } = await supabase
+      .from('cortex_demanda')
+      .delete()
+      .neq('id', 0) // Deletar todos os registros
+
+    if (deleteError) {
+      console.error('Erro ao limpar dados de demanda:', deleteError)
+      return NextResponse.json({ 
+        error: `Erro ao limpar dados existentes: ${deleteError.message}` 
+      }, { status: 500 })
+    }
+
+    console.log('Dados de demanda existentes removidos com sucesso')
 
     const errors: string[] = []
     const successRecords: any[] = []
@@ -255,7 +272,6 @@ export async function POST(request: NextRequest) {
 
       if (batchData.length > 0) {
         console.log(`Tentando inserir lote ${Math.floor(i / BATCH_SIZE) + 1} com ${batchData.length} registros`)
-        console.log('Primeiro registro do lote:', batchData[0])
         
         const { data, error } = await supabase
           .from('cortex_demanda')
@@ -273,12 +289,12 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message: `Upload concluído. ${successRecords.length} registros inseridos.`,
+      message: `Upload concluído. ${successRecords.length} registros inseridos. Dados anteriores foram removidos.`,
       totalProcessed: rows.length,
       successCount: successRecords.length,
       errorCount: errors.length,
-      errors: errors.slice(0, 20), // Mostrar mais erros para debug
-      columnMapping: columnMapping // Incluir mapeamento para debug
+      errors: errors.slice(0, 20),
+      columnMapping: columnMapping
     })
 
   } catch (error) {
