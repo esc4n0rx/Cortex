@@ -17,6 +17,7 @@ interface DemandaItem {
   dt_producao?: string
   desc_material?: string
   setor?: string
+  usuario?: string
 }
 
 interface CorteResultado {
@@ -51,15 +52,23 @@ export async function POST(request: NextRequest) {
     console.log(`Iniciando cálculo de corte para ${setor} (${depositoCodigo}) na data ${data}`)
 
     // 1. VALIDAR SE TEM DADOS DISPONÍVEIS
-    const { data: estoqueCount } = await supabase
+    const { data: estoqueCount, error: estoqueCountError } = await supabase
       .from('cortex_estoque')
       .select('id', { count: 'exact' })
       .eq('dep', depositoCodigo)
 
-    const { data: demandaCount } = await supabase
+    const { data: demandaCount, error: demandaCountError } = await supabase
       .from('cortex_demanda')
       .select('id', { count: 'exact' })
       .eq('deposito', depositoCodigo)
+
+    if (estoqueCountError || demandaCountError) {
+      return NextResponse.json({ 
+        error: 'Erro ao verificar dados disponíveis' 
+      }, { status: 500 })
+    }
+
+    console.log(`Dados disponíveis - Estoque: ${estoqueCount?.length || 0}, Demanda: ${demandaCount?.length || 0}`)
 
     if (!estoqueCount || estoqueCount.length === 0) {
       return NextResponse.json({ 
@@ -73,75 +82,105 @@ export async function POST(request: NextRequest) {
       }, { status: 400 })
     }
 
-    // 2. CONSOLIDAR ESTOQUE POR MATERIAL
-    console.log('Consolidando estoque...')
+    // 2. CONSOLIDAR ESTOQUE POR MATERIAL - SEM FILTROS RESTRITIVOS
+    console.log('Consolidando estoque por material...')
     const { data: estoqueData, error: estoqueError } = await supabase
       .from('cortex_estoque')
       .select('material, estoque_disponivel, texto_breve_material')
       .eq('dep', depositoCodigo)
-      .not('estoque_disponivel', 'is', null)
+      .not('material', 'is', null)
 
     if (estoqueError) {
+      console.error('Erro ao buscar estoque:', estoqueError)
       return NextResponse.json({ 
         error: `Erro ao buscar estoque: ${estoqueError.message}` 
       }, { status: 500 })
     }
 
-    // Consolidar estoque por material (somar estoques do mesmo material)
+    // Consolidar estoque por material (somar estoques, incluindo zeros)
     const estoqueConsolidado = new Map<number, EstoqueConsolidado>()
     
     estoqueData?.forEach(item => {
-      if (item.material && item.estoque_disponivel) {
+      if (item.material !== null && item.material !== undefined) {
+        const estoqueValue = item.estoque_disponivel || 0 // Incluir zeros
         const existing = estoqueConsolidado.get(item.material)
         if (existing) {
-          existing.estoque_total += item.estoque_disponivel
+          existing.estoque_total += estoqueValue
         } else {
           estoqueConsolidado.set(item.material, {
             material: item.material,
-            estoque_total: item.estoque_disponivel,
+            estoque_total: estoqueValue,
             descricao: item.texto_breve_material || ''
           })
         }
       }
     })
 
-    console.log(`Estoque consolidado: ${estoqueConsolidado.size} materiais`)
+    console.log(`Estoque consolidado: ${estoqueConsolidado.size} materiais únicos`)
 
-    // 3. BUSCAR DEMANDA E VALIDAR
-    console.log('Buscando demanda...')
-    const { data: demandaData, error: demandaError } = await supabase
-      .from('cortex_demanda')
-      .select(`
-        material, 
-        quant_nt, 
-        numero_nt, 
-        nome_usuario, 
-        item_finalizado, 
-        dt_producao, 
-        desc_material,
-        setor,
-        usuario
-      `)
-      .eq('deposito', depositoCodigo)
-      .not('material', 'is', null)
-      .not('quant_nt', 'is', null)
-      .order('numero_nt')
+    // 3. BUSCAR TODA A DEMANDA - SEM LIMITAÇÕES
+    console.log('Buscando demanda completa...')
+    
+    // Buscar com paginação para garantir que pegamos todos os dados
+    let allDemandaData: any[] = []
+    const PAGE_SIZE = 1000
+    let page = 0
+    let hasMoreData = true
 
-    if (demandaError) {
-      return NextResponse.json({ 
-        error: `Erro ao buscar demanda: ${demandaError.message}` 
-      }, { status: 500 })
+    while (hasMoreData) {
+      const from = page * PAGE_SIZE
+      const to = from + PAGE_SIZE - 1
+
+      const { data: demandaPage, error: demandaError } = await supabase
+        .from('cortex_demanda')
+        .select(`
+          material, 
+          quant_nt, 
+          numero_nt, 
+          nome_usuario, 
+          item_finalizado, 
+          dt_producao, 
+          desc_material,
+          setor,
+          usuario
+        `)
+        .eq('deposito', depositoCodigo)
+        .not('material', 'is', null)
+        .not('quant_nt', 'is', null)
+        .range(from, to)
+        .order('numero_nt')
+
+      if (demandaError) {
+        console.error('Erro ao buscar demanda:', demandaError)
+        return NextResponse.json({ 
+          error: `Erro ao buscar demanda: ${demandaError.message}` 
+        }, { status: 500 })
+      }
+
+      if (!demandaPage || demandaPage.length === 0) {
+        hasMoreData = false
+      } else {
+        allDemandaData = allDemandaData.concat(demandaPage)
+        page++
+        
+        // Se retornou menos que o page size, chegamos no fim
+        if (demandaPage.length < PAGE_SIZE) {
+          hasMoreData = false
+        }
+      }
+
+      console.log(`Página ${page}: ${demandaPage?.length || 0} registros, Total acumulado: ${allDemandaData.length}`)
     }
 
-    if (!demandaData || demandaData.length === 0) {
+    console.log(`Demanda total carregada: ${allDemandaData.length} linhas`)
+
+    if (allDemandaData.length === 0) {
       return NextResponse.json({ 
         error: 'Não há dados de demanda para processar' 
       }, { status: 400 })
     }
 
-    console.log(`Demanda encontrada: ${demandaData.length} linhas`)
-
-    // 4. PROCESSAR DEMANDA E IDENTIFICAR CORTES
+    // 4. PROCESSAR DEMANDA LINHA POR LINHA - LÓGICA SIMPLIFICADA
     const cortesPorMaterial = new Map<number, CorteResultado>()
     const cortePorSeparador = new Map<string, SeparadorCorte>()
     
@@ -150,92 +189,75 @@ export async function POST(request: NextRequest) {
     let volumeAtendido = 0
     let volumeCortado = 0
 
-    // Primeiro, vamos consolidar a demanda por material para verificar disponibilidade
-    const demandaPorMaterial = new Map<number, number>()
-    
-    demandaData.forEach(item => {
-      if (item.material && item.quant_nt) {
-        const existing = demandaPorMaterial.get(item.material) || 0
-        demandaPorMaterial.set(item.material, existing + item.quant_nt)
+    // Cache para NTs e usuários
+    const ntUsuarioCache = new Map<number, string>()
+
+    // Primeiro pass: mapear usuários por NT
+    allDemandaData.forEach(item => {
+      if (item.numero_nt && (item.nome_usuario || item.usuario)) {
+        const usuario = item.nome_usuario || item.usuario
+        if (!ntUsuarioCache.has(item.numero_nt)) {
+          ntUsuarioCache.set(item.numero_nt, usuario)
+        }
       }
     })
 
-    // Agora processar linha por linha
-    const ntsProcessadas = new Map<number, { usuario: string, totalLinhas: number, linhasComUsuario: number }>()
+    console.log(`Cache de usuários por NT: ${ntUsuarioCache.size} NTs mapeadas`)
 
-    demandaData.forEach(item => {
+    // Segundo pass: processar cada linha
+    allDemandaData.forEach((item, index) => {
+      if (index % 1000 === 0) {
+        console.log(`Processando linha ${index + 1}/${allDemandaData.length}`)
+      }
+
       volumeTotal++
 
-      // Verificar se tem estoque disponível
+      // Verificar se existe no estoque (mesmo que seja zero)
       const estoque = estoqueConsolidado.get(item.material!)
-      const demandaTotal = demandaPorMaterial.get(item.material!)
-
-      if (!estoque || !demandaTotal || estoque.estoque_total < demandaTotal) {
-        // Não tem estoque suficiente - não entra no cálculo
+      if (!estoque) {
+        // Material não existe no cadastro de estoque - pular
         return
       }
 
       volumeOk++
 
-      // Verificar se foi finalizado
+      // Verificar status da linha
       const foiFinalizado = item.item_finalizado === 'X'
-      const foiCortado = item.dt_producao === '1900-01-01'
+      const foiCortado = item.dt_producao === '1900-01-01' || 
+                         item.dt_producao === '01/01/1900' ||
+                         item.dt_producao === '1900-01-01T00:00:00.000Z'
+
+      // Identificar usuário responsável
+      let usuarioResponsavel = item.nome_usuario || item.usuario || ''
+      if (!usuarioResponsavel && item.numero_nt) {
+        usuarioResponsavel = ntUsuarioCache.get(item.numero_nt) || ''
+      }
 
       if (foiFinalizado && !foiCortado) {
+        // ATENDIDO
         volumeAtendido++
-      } else if (foiCortado) {
-        volumeCortado++
-
-        // Identificar quem cortou
-        let usuarioQueCorto = item.nome_usuario || item.usuario || ''
-
-        // Se não tem usuário na linha, ver se conseguimos identificar pela NT
-        if (!usuarioQueCorto && item.numero_nt) {
-          let ntInfo = ntsProcessadas.get(item.numero_nt)
-          
-          if (!ntInfo) {
-            // Primeira vez vendo esta NT, vamos analisar todas as linhas dela
-            const linhasDaNT = demandaData.filter(d => d.numero_nt === item.numero_nt)
-            const linhasComUsuario = linhasDaNT.filter(d => d.nome_usuario || d.usuario)
-            
-            if (linhasComUsuario.length > 0) {
-              // Pegar o usuário mais frequente nas linhas com usuário
-              const usuarioFreq = new Map<string, number>()
-              linhasComUsuario.forEach(linha => {
-                const user = linha.nome_usuario || linha.usuario || ''
-                if (user) {
-                  usuarioFreq.set(user, (usuarioFreq.get(user) || 0) + 1)
-                }
-              })
-              
-              let usuarioMaisFrequente = ''
-              let maiorFreq = 0
-              usuarioFreq.forEach((freq, user) => {
-                if (freq > maiorFreq) {
-                  maiorFreq = freq
-                  usuarioMaisFrequente = user
-                }
-              })
-
-              ntInfo = {
-                usuario: usuarioMaisFrequente,
-                totalLinhas: linhasDaNT.length,
-                linhasComUsuario: linhasComUsuario.length
-              }
-              ntsProcessadas.set(item.numero_nt, ntInfo)
-            }
+        
+        if (usuarioResponsavel) {
+          if (!cortePorSeparador.has(usuarioResponsavel)) {
+            cortePorSeparador.set(usuarioResponsavel, {
+              usuario: usuarioResponsavel,
+              nome_usuario: usuarioResponsavel,
+              total_atendido: 0,
+              total_cortado: 0,
+              percentual_corte: 0
+            })
           }
-
-          if (ntInfo) {
-            usuarioQueCorto = ntInfo.usuario
-          }
+          cortePorSeparador.get(usuarioResponsavel)!.total_atendido += (item.quant_nt || 0)
         }
+      } else if (foiCortado) {
+        // CORTADO
+        volumeCortado++
 
         // Registrar corte por material
         if (!cortesPorMaterial.has(item.material!)) {
           cortesPorMaterial.set(item.material!, {
             material: item.material!,
-            descricao: item.desc_material || estoque?.descricao || '',
+            descricao: item.desc_material || estoque.descricao || '',
             total_cortado: 0,
             linhas_cortadas: 0,
             usuarios_cortaram: []
@@ -243,54 +265,25 @@ export async function POST(request: NextRequest) {
         }
 
         const corteInfo = cortesPorMaterial.get(item.material!)!
-        corteInfo.total_cortado += item.quant_nt!
+        corteInfo.total_cortado += (item.quant_nt || 0)
         corteInfo.linhas_cortadas += 1
         
-        if (usuarioQueCorto && !corteInfo.usuarios_cortaram.includes(usuarioQueCorto)) {
-          corteInfo.usuarios_cortaram.push(usuarioQueCorto)
+        if (usuarioResponsavel && !corteInfo.usuarios_cortaram.includes(usuarioResponsavel)) {
+          corteInfo.usuarios_cortaram.push(usuarioResponsavel)
         }
 
         // Registrar corte por separador
-        if (usuarioQueCorto) {
-          if (!cortePorSeparador.has(usuarioQueCorto)) {
-            cortePorSeparador.set(usuarioQueCorto, {
-              usuario: usuarioQueCorto,
-              nome_usuario: usuarioQueCorto,
+        if (usuarioResponsavel) {
+          if (!cortePorSeparador.has(usuarioResponsavel)) {
+            cortePorSeparador.set(usuarioResponsavel, {
+              usuario: usuarioResponsavel,
+              nome_usuario: usuarioResponsavel,
               total_atendido: 0,
               total_cortado: 0,
               percentual_corte: 0
             })
           }
-
-          const separadorInfo = cortePorSeparador.get(usuarioQueCorto)!
-          separadorInfo.total_cortado += item.quant_nt!
-        }
-      }
-
-      // Contar atendimentos por separador
-      if (foiFinalizado && !foiCortado) {
-        let usuarioAtendeu = item.nome_usuario || item.usuario || ''
-        
-        if (!usuarioAtendeu && item.numero_nt) {
-          const ntInfo = ntsProcessadas.get(item.numero_nt)
-          if (ntInfo) {
-            usuarioAtendeu = ntInfo.usuario
-          }
-        }
-
-        if (usuarioAtendeu) {
-          if (!cortePorSeparador.has(usuarioAtendeu)) {
-            cortePorSeparador.set(usuarioAtendeu, {
-              usuario: usuarioAtendeu,
-              nome_usuario: usuarioAtendeu,
-              total_atendido: 0,
-              total_cortado: 0,
-              percentual_corte: 0
-            })
-          }
-
-          const separadorInfo = cortePorSeparador.get(usuarioAtendeu)!
-          separadorInfo.total_atendido += item.quant_nt!
+          cortePorSeparador.get(usuarioResponsavel)!.total_cortado += (item.quant_nt || 0)
         }
       }
     })
@@ -306,11 +299,19 @@ export async function POST(request: NextRequest) {
     // Calcular percentual geral do setor
     const percentualCorteSetor = volumeOk > 0 ? (volumeCortado / volumeOk) * 100 : 0
 
+    console.log(`Processamento concluído:`)
+    console.log(`- Volume Total: ${volumeTotal}`)
+    console.log(`- Volume OK: ${volumeOk}`)
+    console.log(`- Volume Atendido: ${volumeAtendido}`)
+    console.log(`- Volume Cortado: ${volumeCortado}`)
+    console.log(`- Percentual Corte: ${percentualCorteSetor.toFixed(2)}%`)
+
     // Ordenar resultados
     const cortesMateriais = Array.from(cortesPorMaterial.values())
       .sort((a, b) => b.total_cortado - a.total_cortado)
 
     const cortesSeparadores = Array.from(cortePorSeparador.values())
+      .filter(sep => (sep.total_atendido + sep.total_cortado) > 0) // Só separadores que tiveram atividade
       .sort((a, b) => b.percentual_corte - a.percentual_corte)
 
     // Gravar resultado do corte
@@ -322,7 +323,7 @@ export async function POST(request: NextRequest) {
       volume_ok: volumeOk,
       volume_atendido: volumeAtendido,
       volume_cortado: volumeCortado,
-      percentual_corte: percentualCorteSetor,
+      percentual_corte: Number(percentualCorteSetor.toFixed(2)),
       total_materiais_cortados: cortesMateriais.length,
       total_separadores: cortesSeparadores.length,
       data_processamento: new Date().toISOString()
@@ -337,6 +338,8 @@ export async function POST(request: NextRequest) {
 
     if (corteError) {
       console.error('Erro ao salvar corte:', corteError)
+    } else {
+      console.log(`Corte salvo com ID: ${corteId?.id}`)
     }
 
     const response = {
@@ -354,45 +357,56 @@ export async function POST(request: NextRequest) {
       },
       materiais_cortados: cortesMateriais.slice(0, 20), // Top 20
       separadores: cortesSeparadores,
-      corte_id: corteId?.id
+      corte_id: corteId?.id,
+      debug: {
+        total_demanda_processada: allDemandaData.length,
+        total_materiais_estoque: estoqueConsolidado.size,
+        cache_usuarios_nt: ntUsuarioCache.size
+      }
     }
 
-    // Salvar detalhes dos materiais e separadores se conseguiu salvar o corte principal
+    // Salvar detalhes se conseguiu salvar o corte principal
     if (corteId?.id) {
       // Salvar materiais cortados
-      const materiaisParaSalvar = cortesMateriais.map(material => ({
-        corte_id: corteId.id,
-        material: material.material,
-        descricao: material.descricao,
-        total_cortado: material.total_cortado,
-        linhas_cortadas: material.linhas_cortadas,
-        usuarios_cortaram: material.usuarios_cortaram.join(', ')
-      }))
+      if (cortesMateriais.length > 0) {
+        const materiaisParaSalvar = cortesMateriais.map(material => ({
+          corte_id: corteId.id,
+          material: material.material,
+          descricao: material.descricao,
+          total_cortado: material.total_cortado,
+          linhas_cortadas: material.linhas_cortadas,
+          usuarios_cortaram: material.usuarios_cortaram.join(', ')
+        }))
 
-      if (materiaisParaSalvar.length > 0) {
-        await supabase
+        const { error: materiaisError } = await supabase
           .from('cortex_materiais_cortados')
           .insert(materiaisParaSalvar)
+
+        if (materiaisError) {
+          console.error('Erro ao salvar materiais cortados:', materiaisError)
+        }
       }
 
       // Salvar separadores
-      const separadoresParaSalvar = cortesSeparadores.map(sep => ({
-        corte_id: corteId.id,
-        usuario: sep.usuario,
-        nome_usuario: sep.nome_usuario,
-        total_atendido: sep.total_atendido,
-        total_cortado: sep.total_cortado,
-        percentual_corte: sep.percentual_corte
-      }))
+      if (cortesSeparadores.length > 0) {
+        const separadoresParaSalvar = cortesSeparadores.map(sep => ({
+          corte_id: corteId.id,
+          usuario: sep.usuario,
+          nome_usuario: sep.nome_usuario,
+          total_atendido: sep.total_atendido,
+          total_cortado: sep.total_cortado,
+          percentual_corte: Number(sep.percentual_corte.toFixed(2))
+        }))
 
-      if (separadoresParaSalvar.length > 0) {
-        await supabase
+        const { error: separadoresError } = await supabase
           .from('cortex_separadores_corte')
           .insert(separadoresParaSalvar)
+
+        if (separadoresError) {
+          console.error('Erro ao salvar separadores:', separadoresError)
+        }
       }
     }
-
-    console.log(`Corte calculado: ${volumeCortado} itens cortados de ${volumeOk} válidos (${percentualCorteSetor.toFixed(2)}%)`)
 
     return NextResponse.json(response)
 
