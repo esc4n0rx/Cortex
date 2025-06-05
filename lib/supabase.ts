@@ -57,3 +57,14 @@ export type DemandaData = {
   hr_registro?: string
   data_processamento?: string
 }
+
+export type CadastroItemData = {
+  id?: number
+  material: number
+  descricao: string
+  um: string
+  qtd_por_caixa: number
+  contador: number
+  data_upload?: string
+  status?: string
+}

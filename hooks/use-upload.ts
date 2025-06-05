@@ -8,6 +8,7 @@ interface UploadResult {
   successCount: number
   errorCount: number
   errors: string[]
+  columnMapping?: any
 }
 
 export function useUpload() {
@@ -15,7 +16,7 @@ export function useUpload() {
   const [progress, setProgress] = useState(0)
   const { toast } = useToast()
 
-  const uploadFile = async (file: File, type: 'estoque' | 'demanda'): Promise<UploadResult | null> => {
+  const uploadFile = async (file: File, type: 'estoque' | 'demanda' | 'cadastro'): Promise<UploadResult | null> => {
     if (!file) {
       toast({
         title: "Erro",
